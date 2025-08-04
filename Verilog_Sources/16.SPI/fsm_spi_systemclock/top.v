@@ -1,0 +1,10 @@
+module top(clk,rst,tx_en,dout,done);
+input clk,rst,tx_en;
+output [7:0] dout;
+output done;
+
+wire mosi,sclk,cs;
+
+fsm_spi_systemclock master(mosi,cs,sclk,clk,rst,tx_en);
+slave_spi slave(sclk,mosi,cs,dout,done);
+endmodule

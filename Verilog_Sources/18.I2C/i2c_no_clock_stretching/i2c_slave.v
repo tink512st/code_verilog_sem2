@@ -1,0 +1,242 @@
+module i2c_slave(scl,sda,ack_err,clk,rst,done);
+input scl,clk,rst;
+inout sda;
+output reg done,ack_err;
+
+reg sda_en,sda_t;
+parameter sys_freq = 40000000;
+parameter i2c_freq = 100000; //100kHz
+parameter clk_count4 = sys_freq/i2c_freq;
+parameter clk_count1 = clk_count4/4;
+
+integer count1,i = 0;
+reg [1:0] pulse;
+reg [7:0] mem[128];
+reg busy = 0;
+reg [7:0] din,dout;
+
+reg r_mem,w_mem;
+reg [6:0] addr;
+reg [7:0] r_addr;
+always@(posedge clk) begin
+	if(rst) begin
+		for(i = 0;i<128;i=i+1) 
+			mem[i] <= i;
+		dout <= 8'b0;
+	end
+	else if(r_mem == 1'b1)
+		dout <= mem[addr];
+	else if(w_mem == 1'b1)
+		mem[addr] <= din;
+end
+
+always@(posedge clk) begin
+	if(rst) begin
+		pulse <= 0;
+		count1 <= 0;
+	end
+	else if(count1 == clk_count1-1)begin
+		pulse <= 1;
+		count1 <= count1 + 1;
+    end
+	else if(count1 == clk_count1*2-1)begin
+		pulse <= 2;
+		count1 <= count1 + 1;
+    end
+	else if(count1 == clk_count1*3-1)begin
+		pulse <= 3;
+		count1 <= count1 + 1;
+    end
+	else if(count1 == clk_count1*4-1) begin
+		pulse <= 0;
+		count1 <= 0;
+	end
+	else begin
+		count1 <= count1 + 1;
+	end
+end
+
+typedef enum logic [3:0] {idle = 0, read_addr = 1, send_ack1 = 2, send_data = 3, master_ack = 4, read_data = 5, send_ack2 = 6, wait_p = 7, detect_stop = 8} state_type;
+state_type state = idle; 
+reg [3:0] state = idle;
+reg [3:0] bitcnt;
+reg r_ack;
+always@(posedge clk) begin
+	if(rst) begin
+		state <= idle;
+		bitcnt <= 0;
+		busy <= 0;
+		din <= 8'd0;
+		done <= 0;
+		ack_err <= 0;
+		sda_en <= 0;
+		sda_t <= 0;
+		r_mem <= 0;
+		r_addr <= 0;
+		addr <= 0;
+	end
+	else begin
+		case(state) 
+			idle: begin
+				done <= 0;
+				if(sda == 1'b0 && scl == 1'b1) begin
+					state <= wait_p;
+					busy <= 1;
+				end
+				else 
+					state <= idle;
+			end
+			
+			wait_p: begin
+				if(pulse == 2'b11 && count1 == 399) begin
+					state <= read_addr;
+				end
+				else 
+					state <= wait_p;
+			end
+			
+			read_addr: begin
+				sda_en <= 0;
+				if(bitcnt <= 7) begin
+					case(pulse)
+						0: begin end
+						1: begin end
+						2: begin r_addr <= (count1==200)?{r_addr[6:0],sda}:r_addr; end
+						3: begin end
+					endcase
+					if(count1 == clk_count1*4-1) begin
+						bitcnt <= bitcnt + 1;
+						state <= read_addr;
+					end
+					else 
+						state <= read_addr;
+			     end
+					else begin
+						state <= send_ack1;
+						bitcnt <= 0;
+						sda_en <= 1;
+						addr <= r_addr[7:1];
+					end
+			end
+			send_ack1: begin
+				sda_en <= 1;
+				case(pulse)
+					0: begin sda_t <= 0; end
+					1: begin end
+					2: begin end
+					3: begin end
+				endcase
+				if(count1 == clk_count1*4-1) begin
+					if(r_addr[0] == 1'b0) begin
+						state <= read_data;
+						r_mem <= 1'b0;
+					end
+					else begin
+						state <= send_data;
+						r_mem <= 1'b1;
+					end
+				end
+				else 
+					state <= send_ack1;
+			end
+//			
+			send_data: begin
+				sda_en <= 1;
+				if(bitcnt <= 7) begin
+					r_mem <= 0;
+					case(pulse)
+					0: begin end
+					1: begin sda_t = (count1==100)?dout[7-bitcnt] : sda_t; end
+					2: begin end
+					3: begin end
+					endcase
+					if(count1 == clk_count1*4-1) begin
+						bitcnt<= bitcnt + 1;
+						state <= send_data;
+					end
+					else begin
+						state <= send_data;
+					end
+				end
+				else begin
+					state <= master_ack;
+					bitcnt <= 0;
+					sda_en <= 0;
+				end
+			end
+			read_data: begin
+				sda_en <= 0;
+				if(bitcnt<= 7) begin
+					case(pulse)
+					0: begin end
+					1: begin end
+					2: begin din <=(count1==200)?{din[6:0],sda}:din; end
+					3: begin end
+					endcase
+					if(count1 == clk_count1*4-1) begin
+						state<= read_data;
+						bitcnt <= bitcnt + 1;
+					end
+					else	
+						state <= read_data;
+				end
+				else begin
+					state <= send_ack2;
+					bitcnt <= 0;
+					sda_en <= 1;
+					w_mem <= 1;
+				end
+			end
+			send_ack2: begin
+			sda_en <= 1;
+				case(pulse)
+					0: begin sda_t <= 0; end
+					1: begin w_mem <= 0; end
+					2: begin end
+					3: begin end
+				endcase
+				if(count1 == clk_count1*4-1) begin
+					state <= detec_stop;
+					sda_en <= 0;
+				end
+				else 
+					state <= send_ack2;
+			end
+			master_ack: begin
+				case(pulse)
+					0: begin end
+					1: begin end
+					2: begin r_ack <=(count1==200)?sda:r_ack; end
+					3: begin end
+				endcase
+				if(count1 == clk_count1*4-1) begin
+					if(r_ack == 1'b1) begin
+						state <= detec_stop;
+						sda_en <= 0;
+						ack_err <= 1;
+					end
+					else begin
+						state <= detec_stop;
+						sda_en <= 0;
+						ack_err <= 0;
+					end
+				end
+				else 
+					state <= master_ack;
+			end
+			detec_stop: begin
+				sda_en <= 0;
+				if(count1 == 399 && pulse == 2'b11) begin
+					state <= idle;
+					done <= 1;
+					busy <= 0;
+				end
+				else 
+					state <= detec_stop;
+			end
+			default: state <= idle;
+		endcase
+	end
+end
+assign sda = (sda_en==1'b1)?sda_t:1'bz;
+endmodule

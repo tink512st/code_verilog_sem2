@@ -1,0 +1,275 @@
+module i2c_master(dout,sda,scl,done,ack_err,busy,clk,rst,din,newd,waddr,op);
+input clk,rst,op,newd;
+input [7:0] din;
+input [6:0] waddr;
+output [7:0] dout;
+inout sda;
+output reg done, ack_err, busy;
+output scl;
+
+parameter sys_freq = 40000000;//40Mhz
+parameter i2c_freq = 100000;//100kHz
+
+parameter clk_count4 = sys_freq / i2c_freq;
+parameter clk_count1 = clk_count4/4;
+reg sda_t = 0, scl_t = 0;
+reg [1:0] pulse;
+integer count1 = 0;
+//tao trang thai cho xung
+always @(posedge clk) begin
+	if(rst) begin
+		pulse <= 0;
+		count1 <= 0;
+	end
+	else if(busy == 0) begin
+		pulse <= 0;
+		count1 <= 0;
+	end
+	else if(count1 == clk_count1-1) begin
+		pulse <= 1;
+		count1 <= count1+1;
+	end
+	else if(count1 == clk_count1*2-1) begin
+		pulse <= 2;
+		count1 <= count1+1;
+	end
+	else if(count1 == clk_count1*3-1) begin
+		pulse <= 3;
+		count1 <= count1+1;
+	end
+	else if(count1 == clk_count1*4-1) begin
+		pulse <= 0;
+		count1 <= 0;
+	end
+	else begin
+		count1 <= count1 + 1;
+	end
+end
+
+parameter IDLE = 4'd0, 
+		  START = 4'd1, 
+		  WRITE_ADD = 4'd2, 
+		  ACK_1 = 4'd3, 
+		  WRITE_DATA = 4'd4, 
+		  ACK_2 = 4'd5, 
+		  STOP = 4'd6, 
+		  MASTER_NACK = 4'd7,
+		  READ_DATA = 4'd8;
+reg[3:0] state = IDLE;
+
+reg [7:0]tx_data = 0,rx_data = 0;
+reg [7:0] add = 0;
+reg sda_en = 0,r_ack = 0;
+reg [3:0] bit_count;
+always@(posedge clk) begin
+	if(rst) begin
+		state <= IDLE;
+		bit_count <= 0;
+		sda_t <= 0;
+		scl_t <= 0;
+		tx_data <= 0;
+		add <= 0;
+		ack_err <= 0;
+		busy <= 0;
+		done <= 0;
+	end
+		case(state) 
+			IDLE: begin
+				done <= 0;
+				if(newd) begin
+					state <= START;
+					tx_data <= din;
+					add <= {waddr,op};
+					busy <= 1;
+					ack_err <= 0;
+				end
+				else begin
+					state <= IDLE;
+					tx_data <= 0;
+					add <= 0;
+					busy <= 0;
+					ack_err <= 0;
+				end
+			end
+			START: begin
+				sda_en <= 1'b1;
+				case(pulse)
+					0: begin sda_t <= 1'b1; scl_t <= 1; end
+					1: begin sda_t <= 1'b1; scl_t <= 1; end
+					2: begin sda_t <= 1'b0; scl_t <= 1; end
+					3: begin sda_t <= 1'b0; scl_t <= 1; end
+				endcase
+				if(count1 == clk_count1*4-1) begin
+					sda_en <= 1;
+					state <= WRITE_ADD;
+					scl_t <= 0;
+				end
+				else begin
+					state <= START;
+				end
+			end
+			WRITE_ADD: begin
+				if(bit_count<=7) begin
+					case(pulse) 
+					0: begin scl_t <= 0; sda_t <= 1'b0; end
+					1: begin scl_t <= 0; sda_t <= add[7-bit_count]; end
+					2: begin scl_t <= 1;  end
+					3: begin scl_t <= 1;  end
+					endcase
+					if(count1 == clk_count1*4-1) begin
+						bit_count <= bit_count + 1;
+						scl_t <= 0;
+						state <= WRITE_ADD;
+					end
+					else begin
+						state <= WRITE_ADD;
+					end
+				end
+				else begin
+					bit_count <= 0;
+					state <= ACK_1;
+					scl_t <= 0;
+					sda_en <= 0;
+				end
+			end
+			ACK_1: begin
+				sda_en <= 0;
+				case(pulse) 
+					0: begin scl_t <= 0; sda_t <= 1'b0; end
+					1: begin scl_t <= 0; sda_t <= 1'b0; end
+					2: begin scl_t <= 1; sda_t <= 1'b0; r_ack <= 1'b0; end
+					3: begin scl_t <= 1;  end
+				endcase
+				if(count1 == clk_count1*4-1) begin
+					if(r_ack == 0 && add[0] == 0) begin
+						state <= WRITE_DATA;
+						sda_en <= 1;
+						scl_t <= 0;
+						bit_count <= 0;
+					end
+					else if(r_ack == 0 && add[0] == 1) begin
+						state <= READ_DATA;
+						sda_en <= 0;
+						scl_t <= 0;
+						bit_count <= 0;
+					end
+					else begin
+						state <= STOP;
+						sda_en <= 1;
+						ack_err <= 1;
+					end
+				end
+				else begin
+					state <= ACK_1;
+				end
+			end
+			WRITE_DATA: begin
+				sda_en <= 1'b1;
+				if(bit_count <= 7) begin
+					case(pulse) 
+						0: begin scl_t <= 0; sda_t <= 1'b0; end
+						1: begin scl_t <= 0; sda_t <= tx_data[7-bit_count]; end
+						2: begin scl_t <= 1;  end
+						3: begin scl_t <= 1;  end
+					endcase
+					if(count1 == clk_count1*4-1) begin
+						bit_count <= bit_count + 1;
+						state <= WRITE_DATA;
+						scl_t <= 0;
+					end
+					else 
+						state <= WRITE_DATA;
+				end
+				else begin
+					state <= ACK_2;
+					bit_count <= 0;
+					sda_en <= 0;
+				end
+			end
+			READ_DATA: begin
+				sda_en <= 0;
+				if(bit_count <= 7) begin
+					case(pulse) 
+						0: begin scl_t <= 0; sda_t <= 1'b0; end
+						1: begin scl_t <= 0; sda_t <= 1'b0;end
+						2: begin scl_t <= 1; rx_data <= (count1 == 200)?{rx_data[6:0],sda}: rx_data; end
+						3: begin scl_t <= 1;  end
+					endcase
+					if(count1 == clk_count1*4-1) begin
+						bit_count <= bit_count + 1;
+						state <= READ_DATA;
+						scl_t <= 0;
+					end
+					else 
+						state <= READ_DATA;
+				end
+				else begin
+					state <= MASTER_NACK;
+					bit_count <= 0;
+					sda_en <= 1;
+				end
+			end
+			ACK_2: begin
+				sda_en <= 0;
+				case(pulse) 
+					0: begin scl_t <= 0; sda_t <= 1'b0; end
+					1: begin scl_t <= 0; sda_t <= 1'b0;end
+					2: begin scl_t <= 1; sda_t<= 1'b0; r_ack <= 0; end
+					3: begin scl_t <= 1;  end
+				endcase
+				if(count1 == clk_count1*4-1) begin
+					scl_t <= 1;
+					sda_t <= 0;
+					if(r_ack == 0) begin
+						state <= STOP;
+						sda_en <= 1;
+					end
+					else begin
+						state <= STOP;
+						sda_en <= 1;
+						ack_err <= 1;
+					end
+				end
+				else begin
+					state <= ACK_2;
+				end
+			end
+			MASTER_NACK: begin
+				sda_en <= 1;
+				case(pulse) 
+					0: begin scl_t <= 0; sda_t <= 1'b1; end
+					1: begin scl_t <= 0; sda_t <= 1'b1; end
+					2: begin scl_t <= 1; sda_t <= 1'b1; end
+					3: begin scl_t <= 1; sda_t <= 1'b1; end
+				endcase
+				if(count1== clk_count1*4-1) begin
+					scl_t <= 1;
+					sda_t <= 0;
+					state <= STOP;
+				end
+				else 
+					state <= MASTER_NACK;
+			end
+			STOP: begin
+				case(pulse) 
+					0: begin scl_t <= 1; sda_t <= 1'b0; end
+					1: begin scl_t <= 1; sda_t <= 1'b0; end
+					2: begin scl_t <= 1; sda_t <= 1'b1; end
+					3: begin scl_t <= 1; sda_t <= 1'b1; end
+				endcase
+				if(count1== clk_count1*4-1) begin
+					state <= IDLE;
+					done <= 1;
+					busy <= 0;
+					sda_en <= 1;
+					scl_t <= 0;
+				end
+				else 
+					state <= STOP;
+			end
+		endcase
+end
+assign sda = (sda_en)?(sda_t==1'b0)?1'b0:1'b1:1'bz;
+assign scl = scl_t;
+assign dout = rx_data;
+endmodule
